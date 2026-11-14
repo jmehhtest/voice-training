@@ -46,9 +46,53 @@
 
   function ctx() {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    // 'suspended' before the first tap; iOS also uses 'interrupted' (after a
+    // call, or when Safari has been in the background).
+    if (audioCtx.state !== 'running') { try { audioCtx.resume(); } catch (e) { /* ignore */ } }
     return audioCtx;
   }
+
+  /*
+   * iPhone / iPad Safari:
+   *  1. Audio may only be started from directly inside a tap. Levels start
+   *     their first sound a moment after the tap (once images have loaded),
+   *     which is too late, so every tap first wakes the audio engine here.
+   *  2. Web Audio is muted by the ring/silent switch unless the page is
+   *     marked as media playback.
+   */
+  var audioPrimed = false, silentAudio = null;
+  function unlockAudio() {
+    var c = ctx(); // creates / resumes the audio engine inside the tap
+    if (audioPrimed) return;
+    audioPrimed = true;
+
+    // Playing one silent sample inside a tap unlocks older iOS versions.
+    var src = c.createBufferSource();
+    src.buffer = c.createBuffer(1, 1, c.sampleRate);
+    src.connect(c.destination);
+    src.start(0);
+
+    // Ring/silent switch.
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = 'playback'; } catch (e) { /* ignore */ }
+    } else if (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+      // Older iOS: a looping silent <audio> element has the same effect.
+      try {
+        var silence = new Float32Array(2205);
+        var wav = Voice.toWav({ left: silence, right: silence, sampleRate: 22050 });
+        silentAudio = new Audio(URL.createObjectURL(new Blob([wav], { type: 'audio/wav' })));
+        silentAudio.loop = true;
+        silentAudio.setAttribute('playsinline', '');
+        var p = silentAudio.play();
+        if (p && p.catch) p.catch(function () { /* ignore */ });
+      } catch (e) { /* ignore */ }
+    }
+  }
+  // Capture phase, so this runs before the tapped button's own handler.
+  ['touchend', 'click', 'keydown'].forEach(function (type) {
+    document.addEventListener(type, unlockAudio, true);
+  });
   function stopSound() {
     if (currentSource) { try { currentSource.stop(); } catch (e) { /* already stopped */ } }
     currentSource = null;
